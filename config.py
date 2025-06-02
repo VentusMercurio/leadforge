@@ -9,7 +9,8 @@ class Config:
     # --- Core Flask Settings ---
     SECRET_KEY = os.environ.get('SECRET_KEY') or 'fallback-super-secret-key-leadforge' # Essential for sessions
     FLASK_DEBUG = os.environ.get('FLASK_DEBUG', '0').lower() in ['true', '1', 't'] # More robust boolean check
-
+    NOMINATIM_USER_AGENT = os.environ.get('NOMINATIM_USER_AGENT', 'LeadDawg Pro/1.0 (theoracleunbound@proton.me)')
+    APP_USER_AGENT = os.environ.get('APP_USER_AGENT', 'LeadDawg Pro/1.0')
     # --- Database Settings ---
     # Your DATABASE_URL in .env should be 'sqlite:///leadforge.db' for instance folder usage
     # The fallback here constructs an absolute path to project_root/instance/leadforge.db

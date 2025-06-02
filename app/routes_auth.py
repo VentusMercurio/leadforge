@@ -51,19 +51,36 @@ def register():
 @auth_bp.route('/login', methods=['GET', 'POST']) # <-- ADDED 'GET' METHOD HERE
 def login():
     if request.method == 'POST':
-        data = request.get_json()
+
+        current_app.logger.debug(f"--- LOGIN POST ATTEMPT START ---")
+        current_app.logger.debug(f"DEBUG [Backend /auth/login]: Request Headers: {request.headers}") # <--- ADD THIS
+        current_app.logger.debug(f"DEBUG [Backend /auth/login]: Request Content-Type: {request.content_type}") # <--- ADD THIS
+
+        raw_body_bytes = request.get_data() # Get raw body as bytes
+        raw_body_text = raw_body_bytes.decode('utf-8', errors='replace') # Decode to text
+        current_app.logger.debug(f"Request Raw Body (text): '{raw_body_text}'")
+
+
+        data = None
+        if request.is_json: # Check if Flask thinks it's JSON based on Content-Type
+            data = request.get_json(silent=True)
+            current_app.logger.debug(f"Data from request.get_json(): {data}")
+        else:
+            current_app.logger.warning(f"Request Content-Type is not application/json. It is: {request.content_type}")
+
         if not data:
-            return jsonify(message="No input data provided"), 400
+            current_app.logger.error(f"Failed to parse JSON or data is empty. Raw body was: '{raw_body_text}'")
+            return jsonify(message="Invalid request format or empty body."), 400
 
-        login_identifier = data.get('email') # Frontend sends 'email' as the identifier
-        password = data.get('password')
+        login_identifier = data.get('email')
+        password_data = data.get('password')
 
-        if not login_identifier or not password:
+        if not login_identifier or not password_data:
+            current_app.logger.error(f"Missing identifier or password in parsed JSON. Identifier: '{login_identifier}', Password provided: {'yes' if password_data else 'no'}. Parsed data: {data}")
             return jsonify(message="Email/username and password are required"), 400
-
         user = User.query.filter((User.username == login_identifier) | (User.email == login_identifier)).first()
 
-        if user and user.check_password(password): # Assumes User model has check_password
+        if user and user.check_password(password_data): # Assumes User model has check_password
             login_user(user, remember=data.get('remember', True)) 
             current_app.logger.info(f"User {user.username} logged in successfully.")
             return jsonify(

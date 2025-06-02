@@ -194,7 +194,8 @@ def enrich_saved_lead_route(lead_id):
         business_name=saved_lead.name, 
         address=saved_lead.address, 
         latitude=saved_lead.latitude, 
-        longitude=saved_lead.longitude
+        longitude=saved_lead.longitude,
+        known_place_id=saved_lead.google_place_id
     )
 
     if google_data:
