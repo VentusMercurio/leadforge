@@ -151,7 +151,7 @@ def enrich_with_google_places(business_name, address=None, latitude=None, longit
 
     details_url = "https://maps.googleapis.com/maps/api/place/details/json"
     # Request more fields that are useful
-    details_fields = "place_id,name,formatted_address,international_phone_number,website,opening_hours,price_level,rating,user_ratings_total,photo,url,business_status,type,vicinity,utc_offset_minutes"
+    details_fields = "place_id,name,formatted_address,international_phone_number,website,opening_hours,price_level,rating,user_ratings_total,photos,url,business_status,types,vicinity,utc_offset"
     details_params = {
         "place_id": place_id,
         "fields": details_fields,
