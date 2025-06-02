@@ -1,9 +1,9 @@
 # app/utils.py
 import requests
-from flask import current_app # For accessing app config and extensions like cache
-import time # Keep for potential future rate limiting needs
+from flask import current_app
+import time
 
-# Define cache timeouts (in seconds) at the module level for clarity
+# Define cache timeouts (in seconds)
 FIND_PLACE_CACHE_TIMEOUT = 3600 * 24     # Cache Place ID result for 1 day
 PLACE_DETAILS_CACHE_TIMEOUT = 3600 * 6 # Cache full details for 6 hours
 NOMINATIM_CACHE_TIMEOUT = 3600 * 24 * 7  # Cache geocoding results for 1 week
@@ -11,7 +11,9 @@ NOMINATIM_CACHE_TIMEOUT = 3600 * 24 * 7  # Cache geocoding results for 1 week
 def get_coordinates_for_city(city_name):
     """Geocodes a city name to latitude, longitude, and bounding box using Nominatim, with caching."""
     cache = current_app.extensions.get('cache')
-    nominatim_cache_key = f"nominatim_coords:{city_name.lower().replace(' ', '_').replace(',', '')}"
+    # More robust cache key: remove all non-alphanumeric for broader match on slight variations
+    normalized_city_name = ''.join(filter(str.isalnum, city_name.lower()))
+    nominatim_cache_key = f"nominatim_coords_v2:{normalized_city_name}" # Added v2 for namespacing
 
     if cache:
         cached_data = cache.get(nominatim_cache_key)
@@ -25,21 +27,20 @@ def get_coordinates_for_city(city_name):
         print("ERROR [get_coordinates_for_city]: Nominatim API URL not configured.")
         return None
 
-    headers = {'User-Agent': current_app.config.get('NOMINATIM_USER_AGENT', 'LeadForgeApp/0.1 contact@example.com')}
+    headers = {'User-Agent': current_app.config.get('NOMINATIM_USER_AGENT', 'LeadForgeApp/0.1 contact@example.com')} 
     params = {'q': city_name, 'format': 'json', 'limit': 1, 'addressdetails': 1}
     
     print(f"DEBUG [get_coordinates_for_city]: Requesting Nominatim: {nominatim_url} with params: {params}")
     try:
-        # Consider adding time.sleep(1.1) here if making many *uncached* calls rapidly
         response = requests.get(nominatim_url, params=params, headers=headers, timeout=10)
         response.raise_for_status()
         data = response.json()
         print(f"DEBUG [get_coordinates_for_city]: Nominatim raw response data (first 500 chars): {str(data)[:500]}")
         if data and len(data) > 0:
             location_data = data[0]
-            bbox_nominatim = location_data.get('boundingbox') # [south, north, west, east]
+            bbox_nominatim = location_data.get('boundingbox')
             if bbox_nominatim and len(bbox_nominatim) == 4:
-                bbox_overpass_coords_only = f"{bbox_nominatim[0]},{bbox_nominatim[2]},{bbox_nominatim[1]},{bbox_nominatim[3]}" # south,west,north,east
+                bbox_overpass_coords_only = f"{bbox_nominatim[0]},{bbox_nominatim[2]},{bbox_nominatim[1]},{bbox_nominatim[3]}"
                 result = {
                     'latitude': float(location_data.get('lat')),
                     'longitude': float(location_data.get('lon')),
@@ -63,50 +64,89 @@ def get_coordinates_for_city(city_name):
     return None
 
 
-def fetch_osm_data(osm_tag_key, osm_tag_value, bounding_box_str, limit=20, osm_object_types=("node", "way", "relation")):
-    """Fetches data from Overpass API. Caching Overpass results can be complex due to query variability, so not implemented here by default."""
+# --- MODIFIED fetch_osm_data ---
+def fetch_osm_data(tag_conditions_list, bounding_box_str, limit=50, osm_object_types=("node", "way", "relation")):
+    """
+    Fetches data from Overpass API based on a LIST of tag conditions (tuples) 
+    and a bounding box string.
+    tag_conditions_list should be a list of (key, value) or (key, operator, value) tuples.
+    Example: [("amenity", "bar"), ("amenity", "pub")] for OR
+             [("name", "~", "Joe's Pizza", "i")] for case-insensitive regex name search
+    bounding_box_str should be "south_lat,west_lon,north_lat,east_lon"
+    """
     overpass_url = current_app.config.get('OVERPASS_API_URL')
     if not overpass_url:
         print("ERROR [fetch_osm_data]: Overpass API URL not configured.")
         return [] 
-    query_parts = []
+
+    if not tag_conditions_list: # Ensure there's something to query
+        print("ERROR [fetch_osm_data]: No tag conditions provided.")
+        return []
+
+    query_clauses = []
     for obj_type in osm_object_types:
-        query_parts.append(f'{obj_type}["{osm_tag_key}"="{osm_tag_value}"]({bounding_box_str});')
-    timeout_seconds = 30
+        for condition in tag_conditions_list:
+            if len(condition) == 2: # Standard (key, value) tuple
+                key, value = condition
+                if value == "*": # Wildcard value
+                    query_clauses.append(f'{obj_type}["{key}"]({bounding_box_str});')
+                else: # Specific value
+                    query_clauses.append(f'{obj_type}["{key}"="{value}"]({bounding_box_str});')
+            elif len(condition) == 3: # For regex or other operators: (key, operator, value)
+                key, operator, value = condition
+                query_clauses.append(f'{obj_type}["{key}"{operator}"{value}"]({bounding_box_str});')
+            elif len(condition) == 4: # For regex with flags: (key, operator, value, flags)
+                key, operator, value, flags = condition
+                query_clauses.append(f'{obj_type}["{key}"{operator}"{value}",{flags}]({bounding_box_str});')
+            # Add more complex condition handling if needed
+    
+    if not query_clauses:
+        print("ERROR [fetch_osm_data]: Failed to construct any valid query clauses.")
+        return []
+
+    timeout_seconds = current_app.config.get('OVERPASS_TIMEOUT', 30) # Make timeout configurable
+    # The ( ... ); structure in Overpass QL implies OR (union) between the statements inside it.
     overpass_query = f"""\
     [out:json][timeout:{timeout_seconds}];
     (
-      {''.join(query_parts)}
+      {''.join(query_clauses)}
     );
     out center {limit}; 
     """
+
     print(f"DEBUG [fetch_osm_data]: Constructed Overpass Query:\n{overpass_query}")
     print(f"DEBUG [fetch_osm_data]: Posting to Overpass URL: {overpass_url}")
     try:
-        response = requests.post(overpass_url, data={'data': overpass_query}, headers={'User-Agent': current_app.config.get('APP_USER_AGENT', 'LeadForgeApp/0.1')}, timeout=timeout_seconds + 5)
+        response = requests.post(
+            overpass_url, 
+            data={'data': overpass_query}, 
+            headers={'User-Agent': current_app.config.get('APP_USER_AGENT', 'LeadForgeApp/0.1 contact@example.com')}, 
+            timeout=timeout_seconds + 10 # Request timeout slightly longer than query timeout
+        )
         response.raise_for_status()
         data = response.json()
         print(f"DEBUG [fetch_osm_data]: Raw Overpass JSON response (first 500 chars): {str(data)[:500]}")
         elements = data.get('elements', [])
         print(f"DEBUG [fetch_osm_data]: Overpass response elements count: {len(elements)}")
         return elements
+    # ... (Your existing robust error handling for fetch_osm_data) ...
     except requests.exceptions.HTTPError as http_err:
         print(f"ERROR [fetch_osm_data]: Overpass API HTTP error: {http_err} - Status: {response.status_code if 'response' in locals() else 'N/A'} - Response: {response.text if 'response' in locals() else 'N/A'}")
     except requests.exceptions.Timeout:
-        print(f"ERROR [fetch_osm_data]: Overpass API request timed out after {timeout_seconds + 5} seconds.")
+        print(f"ERROR [fetch_osm_data]: Overpass API request timed out after {timeout_seconds + 10} seconds.")
     except requests.exceptions.RequestException as e:
         print(f"ERROR [fetch_osm_data]: Overpass API request error: {e}")
     except Exception as e:
         print(f"ERROR [fetch_osm_data]: Error processing Overpass response: {e}")
     return []
+# --- END MODIFIED fetch_osm_data ---
 
 
+# --- enrich_with_google_places function (your existing cached version is good) ---
 def enrich_with_google_places(business_name, address=None, latitude=None, longitude=None, known_place_id=None):
-    """
-    Finds a place on Google and get its details, using caching.
-    Can optionally take a known_place_id to skip the "Find Place" step.
-    """
-    cache = current_app.extensions.get('cache') # Get cache instance
+    # ... (This function's internal logic with caching remains the same as the last version you had) ...
+    # ... (ensure it starts with cache = current_app.extensions.get('cache') and uses it) ...
+    cache = current_app.extensions.get('cache') 
     if not cache:
         print("ERROR [enrich_with_google_places]: Cache not available. Proceeding without caching.")
 
@@ -119,9 +159,10 @@ def enrich_with_google_places(business_name, address=None, latitude=None, longit
     
     if not place_id_to_use:
         find_place_cache_key_parts = [
-            "gfind_pid", str(business_name or "").lower().strip().replace(" ", "_"),
+            "gfind_pid_v2", # Namespace for this cache type, added v2
+            str(business_name or "").lower().strip().replace(" ", "_"),
             str(address or "").lower().strip().replace(" ", "_").replace(",", ""),
-            str(round(latitude, 3)) if latitude is not None else "none",
+            str(round(latitude, 3)) if latitude is not None else "none", 
             str(round(longitude, 3)) if longitude is not None else "none"
         ]
         find_place_cache_key = ":".join(part for part in find_place_cache_key_parts if part)
@@ -151,7 +192,7 @@ def enrich_with_google_places(business_name, address=None, latitude=None, longit
                         print(f"DEBUG [enrich_with_google_places]: Found and cached Place ID: {place_id_to_use}")
                 elif find_data.get("status") != "OK":
                     print(f"WARNING [enrich_with_google_places]: Google Find Place status not OK: {find_data.get('status')} for '{business_name}'. Error: {find_data.get('error_message')}")
-            except Exception as e: # Catching a broader range of request/parsing errors
+            except Exception as e:
                 print(f"ERROR [enrich_with_google_places]: Google Find Place API call/processing error for '{business_name}': {e}")
                 return None 
 
@@ -164,6 +205,11 @@ def enrich_with_google_places(business_name, address=None, latitude=None, longit
     if cache: cached_details_result = cache.get(details_cache_key)
     
     if cached_details_result:
+        # Important: If you cache errors/None, handle that here.
+        # For instance, if cached_details_result = {"error": "API_ERROR"}, return None or raise.
+        if isinstance(cached_details_result, dict) and cached_details_result.get("error"):
+            print(f"DEBUG [enrich_with_google_places]: Cache HIT for Place Details ID {place_id_to_use}, but it was an error: {cached_details_result}")
+            return None 
         print(f"DEBUG [enrich_with_google_places]: Cache HIT for Place Details ID: {place_id_to_use}")
         return cached_details_result
 
@@ -204,9 +250,10 @@ def enrich_with_google_places(business_name, address=None, latitude=None, longit
             return processed_details
         else:
             print(f"WARNING [enrich_with_google_places]: Google Place Details status not OK: {details_data.get('status')} for ID {place_id_to_use}. Error: {details_data.get('error_message')}")
-            if cache: # Optionally cache "not found" or error for a short time
-                 cache.set(details_cache_key, {"error": "API_ERROR", "status": details_data.get('status')}, timeout=300) # Cache error for 5 min
+            if cache:
+                 cache.set(details_cache_key, {"error": "API_ERROR", "status": details_data.get('status')}, timeout=300) 
             return None 
-    except Exception as e: # Catching a broader range of request/parsing errors
+    except Exception as e:
         print(f"ERROR [enrich_with_google_places]: Google Place Details API call/processing error for ID {place_id_to_use}: {e}")
     return None
+# --- END enrich_with_google_places ---
